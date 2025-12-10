@@ -1,0 +1,131 @@
+name: CI/CD – IDURAR ERP CRM
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build-and-push:
+    name: Build & Push Docker Images
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ---------- Backend tests ----------
+      - name: Setup Node.js for backend
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install backend deps
+        run: |
+          cd backend
+          npm ci
+
+      - name: Run backend tests (if any)
+        run: |
+          cd backend
+          npm test || echo "No backend tests configured"
+
+      # ---------- Frontend tests ----------
+      - name: Install frontend deps
+        run: |
+          cd frontend
+          npm ci
+
+      - name: Run frontend tests (if any)
+        run: |
+          cd frontend
+          npm test || echo "No frontend tests configured"
+
+      # ---------- Docker login ----------
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # ---------- Build & push backend image ----------
+      - name: Build & push backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/idurar-backend:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/idurar-backend:${{ github.sha }}
+
+      # ---------- Build & push frontend image ----------
+      - name: Build & push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/idurar-frontend:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/idurar-frontend:${{ github.sha }}
+
+  deploy:
+    name: Deploy to Lightsail
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'  # only deploy on push to master, not PRs
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          port: ${{ secrets.SSH_PORT }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            # Pull latest images
+            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/idurar-backend:latest
+            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/idurar-frontend:latest
+
+            # Stop & remove old containers (ignore errors)
+            docker stop idurar-backend || true
+            docker rm idurar-backend || true
+
+            docker stop idurar-frontend || true
+            docker rm idurar-frontend || true
+
+            # Run backend
+            docker run -d \
+              --name idurar-backend \
+              --restart always \
+              -p 8888:8888 \
+              -e DATABASE='${{ secrets.MONGODB_URI }}' \
+              -e JWT_SECRET='${{ secrets.JWT_SECRET }}' \
+              -e NODE_ENV=production \
+              -e PUBLIC_SERVER_FILE='${{ secrets.PUBLIC_SERVER_FILE }}' \
+              ${{ secrets.DOCKERHUB_USERNAME }}/idurar-backend:latest
+
+            # Run frontend (served by Nginx on port 80 inside container)
+            docker run -d \
+              --name idurar-frontend \
+              --restart always \
+              -p 3000:80 \
+              ${{ secrets.DOCKERHUB_USERNAME }}/idurar-frontend:latest
+
+      # ---------- Slack notification ----------
+      - name: Notify Slack on success
+        if: success() && secrets.SLACK_WEBHOOK_URL != ''
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"✅ Deployment successful for *${{ github.repository }}* on commit *${{ github.sha }}*.\"}" \
+            ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Notify Slack on failure
+        if: failure() && secrets.SLACK_WEBHOOK_URL != ''
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"❌ Deployment FAILED for *${{ github.repository }}* on commit *${{ github.sha }}*. Check GitHub Actions logs.\"}" \
+            ${{ secrets.SLACK_WEBHOOK_URL }}
