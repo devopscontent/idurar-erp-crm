@@ -117,16 +117,28 @@ jobs:
 
       # ---------- Slack notification ----------
       - name: Notify Slack on success
-        if: ${{ success() && secrets.SLACK_WEBHOOK_URL != '' }}
+        if: ${{ success() }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "No Slack webhook configured, skipping success notification."
+            exit 0
+          fi
           curl -X POST -H 'Content-type: application/json' \
             --data "{\"text\":\"✅ Deployment successful for *${{ github.repository }}* on commit *${{ github.sha }}*.\"}" \
-            ${{ secrets.SLACK_WEBHOOK_URL }}
+            "$SLACK_WEBHOOK_URL"
 
       - name: Notify Slack on failure
-        if: ${{ failure() && secrets.SLACK_WEBHOOK_URL != '' }}
+        if: ${{ failure() }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "No Slack webhook configured, skipping failure notification."
+            exit 0
+          fi
           curl -X POST -H 'Content-type: application/json' \
             --data "{\"text\":\"❌ Deployment FAILED for *${{ github.repository }}* on commit *${{ github.sha }}*. Check GitHub Actions logs.\"}" \
-            ${{ secrets.SLACK_WEBHOOK_URL }}
+            "$SLACK_WEBHOOK_URL"
 
